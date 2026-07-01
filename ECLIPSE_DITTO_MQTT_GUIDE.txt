@@ -1,0 +1,318 @@
+═══════════════════════════════════════════════════════════════════════════════
+ECLIPSE DITTO AND MQTT SETUP GUIDE
+A Digital Twin-Driven Framework with Machine Learning Integration
+for Crop-Yield Prediction
+SoftCOM 2026 | Manuscript #1571302175
+═══════════════════════════════════════════════════════════════════════════════
+
+This file describes the Eclipse Ditto and MQTT configuration used in the
+paper's experimental setup (Section III-A), how the pipeline components
+connect to each other, and how to run the MQTT simulator against either a
+real or mock broker.
+
+───────────────────────────────────────────────────────────────────────────────
+1. OVERVIEW OF THE DATA FLOW
+───────────────────────────────────────────────────────────────────────────────
+
+Physical field sensors (simulated)
+          │
+          │  MQTT publish
+          │  topic: sensors/{sensor_id}/telemetry
+          ▼
+   MQTT Broker (Mosquitto / Eclipse Ditto MQTT adapter)
+          │
+          │  Subscribe
+          ▼
+   ML Service (MLService class in 05_mqtt_dt_simulator.py)
+      - SeasonalAggregator accumulates daily readings over 180-day window
+      - After 180 days: computes seasonal mean temp, sum rainfall, cumulative pesticides
+      - Calls the per-crop RF model: predict_yield(...)
+          │
+          │  MQTT publish
+          │  topic: things/my.sensors:{sensor_id}/commands/modify
+          ▼
+   Eclipse Ditto (digital model layer)
+      - Updates predicted_yield feature on the corresponding Thing
+      - Exposes the updated state via REST API (GET /api/2/things/...)
+          │
+          │  REST API poll (every t minutes)
+          ▼
+   DT Visualisation (custom Python/Matplotlib script)
+      - Reads sensor attributes and predicted_yield from Ditto REST API
+      - Renders the crop-field heatmap (Figure 3 in the paper)
+
+───────────────────────────────────────────────────────────────────────────────
+2. ECLIPSE DITTO CONFIGURATION
+───────────────────────────────────────────────────────────────────────────────
+
+Thing IDs (four virtual sensors, one per irrigation zone):
+  my.sensors:sensor01   Zone A — drip irrigation
+  my.sensors:sensor02   Zone B — sprinkler
+  my.sensors:sensor03   Zone C — flood/furrow
+  my.sensors:sensor04   Zone D — micro-spray
+
+Policy ID (shared access policy for all four Things):
+  my.test:policy
+
+Per-Thing attributes (static metadata):
+  type      : "field_sensor"
+  location  : { "zone": "A", "irrigation": "drip" }   (varies per sensor)
+
+Per-Thing features (updated at runtime):
+  telemetry
+    properties:
+      avg_temp          : float   (degC)
+      rainfall_mm       : float   (mm)
+      pesticides        : float   (tonnes)
+      timestamp         : string  (ISO 8601 UTC)
+
+  predicted_yield
+    properties:
+      value             : float   (hg/ha)  — written by the ML service
+      unit              : "hg/ha"
+      n_days_aggregated : int     — number of days in the seasonal window
+      timestamp         : string  (ISO 8601 UTC)
+
+Ditto REST API example — read predicted_yield for sensor01:
+  GET /api/2/things/my.sensors:sensor01/features/predicted_yield
+  Host: localhost:8080
+
+Ditto REST API example — write predicted_yield (ML service PATCH):
+  PUT /api/2/things/my.sensors:sensor01/features/predicted_yield
+  Content-Type: application/json
+  Body:
+  {
+    "properties": {
+      "value": 37374.0,
+      "unit": "hg/ha",
+      "n_days_aggregated": 180,
+      "timestamp": "2023-06-30T12:34:56.789Z"
+    }
+  }
+
+───────────────────────────────────────────────────────────────────────────────
+3. MQTT TOPIC SCHEMA
+───────────────────────────────────────────────────────────────────────────────
+
+Defined in config.py:
+  MQTT_TOPIC_TEMPLATE = "sensors/{sensor_id}/telemetry"
+
+Inbound topics (sensor -> broker -> ML service):
+  sensors/sensor01/telemetry
+  sensors/sensor02/telemetry
+  sensors/sensor03/telemetry
+  sensors/sensor04/telemetry
+
+Outbound topics (ML service -> broker -> Ditto PATCH):
+  things/my.sensors:sensor01/commands/modify
+  things/my.sensors:sensor02/commands/modify
+  things/my.sensors:sensor03/commands/modify
+  things/my.sensors:sensor04/commands/modify
+
+Inbound message payload (SensorReading dataclass, serialised as JSON):
+  {
+    "sensor_id"   : "sensor01",
+    "crop"        : "Wheat",
+    "area"        : "Italy",
+    "year"        : 2023,
+    "avg_temp"    : 14.53,
+    "rainfall_mm" : 782.1,
+    "pesticides"  : 11987.4,
+    "timestamp"   : "2023-03-15T09:22:11.004Z"
+  }
+
+Outbound message payload (YieldPrediction -> Ditto PATCH format):
+  {
+    "thingId": "my.sensors:sensor01",
+    "features": {
+      "predicted_yield": {
+        "properties": {
+          "value"             : 37374.0,
+          "unit"              : "hg/ha",
+          "n_days_aggregated" : 180,
+          "timestamp"         : "2023-09-12T08:00:00.000Z"
+        }
+      }
+    }
+  }
+
+───────────────────────────────────────────────────────────────────────────────
+4. SEASONAL AGGREGATOR (SeasonalAggregator class in dt_validation.py)
+───────────────────────────────────────────────────────────────────────────────
+
+This class solves the temporal-scale mismatch between high-frequency IoT
+sensor streams (millisecond-to-minute cadence) and the RF model (trained on
+annual FAO/World Bank aggregates).
+
+Window length:  180 days  (defined as SEASON_WINDOW_DAYS in config.py)
+
+Algorithm:
+  1. Each inbound sensor reading is appended to an internal buffer.
+  2. While len(buffer) < 180: return None (window not yet full).
+  3. When len(buffer) >= 180: compute seasonal aggregates and return them:
+       avg_temp  = mean(all temperature readings in the window)
+       rainfall  = mean(all rainfall readings in the window)
+       pesticides = mean(all pesticide readings in the window)
+  4. The aggregated tuple is passed to predict_yield() for the relevant crop.
+  5. agg.reset() clears the buffer for the next 180-day window.
+
+Sensor noise levels applied during simulation (defined in config.SENSOR_NOISE):
+  avg_temp                     : Gaussian N(0, 0.5) degC
+  average_rain_fall_mm_per_year: Gaussian N(0, 10.0) mm
+  pesticides_tonnes            : multiplicative N(0, 0.02) i.e. +-2% of value
+
+───────────────────────────────────────────────────────────────────────────────
+5. RUNNING THE MQTT SIMULATOR
+───────────────────────────────────────────────────────────────────────────────
+
+OPTION A — Mock mode (no external service required, runs offline):
+
+  python src/05_mqtt_dt_simulator.py --mock
+
+  What happens:
+  - An in-memory MockBroker (no network) handles all pub/sub.
+  - SensorSimulator streams 190 days x 4 sensors to the broker.
+  - MLService subscribes, accumulates 180 readings per sensor,
+    then calls the RF model and prints the Ditto PATCH to stdout.
+  - No Eclipse Ditto instance or MQTT broker installation needed.
+
+  Expected output (one block per sensor after 180 days):
+    [Simulator] Streaming 190 days × 4 sensors …
+
+      [MLService] sensor01 day   1/180  temp=14.5°C
+      ...
+      ★ [MLService] Prediction for sensor01 (Wheat)
+          seasonal avg_temp  = 14.48 °C
+          seasonal rainfall  = 779.8 mm
+          predicted yield    = 37,374 hg/ha
+          Ditto PATCH        → things/my.sensors:sensor01/commands/modify
+
+      [Ditto PATCH] thingId=my.sensors:sensor01  yield=37,374 hg/ha
+
+OPTION B — Real MQTT broker (Mosquitto + Eclipse Ditto running locally):
+
+  # Start Mosquitto (or use Eclipse Ditto's built-in MQTT adapter)
+  mosquitto -p 1883
+
+  # In a separate terminal, start Eclipse Ditto (Docker):
+  git clone https://github.com/eclipse/ditto.git
+  cd ditto/deployment/docker
+  docker-compose up -d
+
+  # Run the simulator against the real broker:
+  python src/05_mqtt_dt_simulator.py --broker localhost --port 1883
+
+  # Query the updated predicted_yield from Ditto REST API:
+  curl -u ditto:ditto \
+       http://localhost:8080/api/2/things/my.sensors:sensor01/features/predicted_yield
+
+OPTION C — Run with custom parameters:
+
+  python src/05_mqtt_dt_simulator.py \
+      --mock \
+      --days 360        # simulate a full year (two 180-day windows per sensor)
+
+───────────────────────────────────────────────────────────────────────────────
+6. RUNNING THE KS-TEST ROBUSTNESS EXPERIMENT (dt_validation.py)
+───────────────────────────────────────────────────────────────────────────────
+
+  python src/dt_validation.py
+
+This runs two experiments:
+
+  Experiment A (KS-test):
+    - Loads the FAO test set
+    - Adds realistic Gaussian sensor noise (config.SENSOR_NOISE)
+    - Runs KS test comparing prediction distributions
+    - Expected result: KS = 0.013, p = 0.42 (joint across all crops)
+    - Saves: results/ks_test_results.csv
+             results/fig_prediction_distributions.png
+
+  Experiment B (Seasonal aggregation demo):
+    - Simulates 365 days of sensor stream for Wheat and Maize
+    - Invokes the RF model every 180 days
+    - Saves: results/fig_seasonal_aggregation.png
+
+───────────────────────────────────────────────────────────────────────────────
+7. SENSOR SIMULATION PARAMETERS
+───────────────────────────────────────────────────────────────────────────────
+
+Four sensors are simulated, each assigned a crop, country, year, and base
+climate values (from SensorSimulator.SENSOR_CONFIG in 05_mqtt_dt_simulator.py):
+
+  sensor01 | Wheat       | Italy | 2023 | base_temp=14.5°C | rain=780mm  | pest=12000t
+  sensor02 | Maize       | Italy | 2023 | base_temp=18.2°C | rain=820mm  | pest=55000t
+  sensor03 | Potatoes    | Italy | 2023 | base_temp=12.0°C | rain=700mm  | pest=90000t
+  sensor04 | Rice, paddy | Italy | 2023 | base_temp=19.5°C | rain=1100mm | pest=30000t
+
+For the 2026-2029 counterfactual scenario (Section III-E of the paper),
+the base trajectory values used were:
+  Year  | Temp (degC) | Rainfall (mm) | Pesticides (tonnes)
+  2026  | 14.5        | 827.0         | 133.0
+  2027  | 14.8        | 810.0         | 135.0
+  2028  | 15.1        | 780.0         | 140.0
+  2029  | 15.4        | 750.0         | 145.0
+
+Per-sensor additive offsets on top of the base trajectory:
+  sensor01: +0.0°C, +0.0mm  (base, no offset)
+  sensor02: +0.3°C, +4.2mm
+  sensor03: -0.3°C, -1.5mm
+  sensor04: +0.1°C, +2.1mm
+
+───────────────────────────────────────────────────────────────────────────────
+8. DEPENDENCIES
+───────────────────────────────────────────────────────────────────────────────
+
+  pip install -r requirements.txt
+
+Key packages:
+  paho-mqtt      MQTT client (sensor publisher and ML service subscriber)
+  requests       REST API calls to Eclipse Ditto
+  scikit-learn   RandomForestRegressor, LabelEncoder
+  numpy          Sensor noise generation, seasonal aggregation
+  pandas         Dataset loading and feature engineering
+  matplotlib     Figure generation
+  scipy          KS-test (scipy.stats.ks_2samp)
+
+Eclipse Ditto (optional, only needed for Option B above):
+  Version tested: Eclipse Ditto 3.x
+  Docker Compose deployment:
+    https://github.com/eclipse/ditto/tree/main/deployment/docker
+
+Mosquitto MQTT broker (optional, only needed for Option B above):
+  sudo apt install mosquitto mosquitto-clients
+  mosquitto -p 1883
+
+───────────────────────────────────────────────────────────────────────────────
+9. IMPORTANT NOTES FOR REVIEWERS
+───────────────────────────────────────────────────────────────────────────────
+
+1. MOCK MODE IS FULLY SELF-CONTAINED
+   Running python src/05_mqtt_dt_simulator.py --mock requires no external
+   services (no Ditto, no Mosquitto, no Docker). The entire pipeline —
+   sensor telemetry, MQTT routing, seasonal aggregation, RF inference, and
+   Ditto PATCH — runs in-process and prints all outputs to stdout.
+   This is the recommended starting point for reviewers.
+
+2. LATENCY MEASUREMENT SCOPE
+   The round-trip latency reported in the paper (<20 ms, Figure 9) was
+   measured on a local-network single-server setup. It does not account for
+   wide-area network latency, cloud congestion, or multi-broker federation.
+
+3. KS TEST SCOPE
+   The robustness experiment evaluates Gaussian additive noise only.
+   Systematic failure modes (calibration drift, packet loss, broker
+   congestion, sensor dropout) are outside the scope of this experiment.
+
+4. DITTO AS DISPLAY LAYER
+   In this prototype, Eclipse Ditto functions as a digital model layer that
+   maintains persistent virtual state for each sensor Thing and exposes it
+   via REST API. The predicted_yield feature is written by the ML service
+   after each 180-day aggregation and can be polled by any downstream
+   consumer (dashboards, actuators, visualisation scripts). Bidirectional
+   actuation (using Ditto PATCH to trigger physical actuators) is described
+   conceptually in Section III-A and left as future work.
+
+═══════════════════════════════════════════════════════════════════════════════
+END OF ECLIPSE DITTO AND MQTT SETUP GUIDE
+═══════════════════════════════════════════════════════════════════════════════
