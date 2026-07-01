@@ -1,0 +1,299 @@
+═══════════════════════════════════════════════════════════════════════════════
+REPOSITORY CONTENTS — dt-crop-yield
+A Digital Twin-Driven Framework with Machine Learning Integration
+for Crop-Yield Prediction
+SoftCOM 2026 | Manuscript #1571302175
+Authors: Ayub Shah, Rawlings Ntassah, Fabrizio Granelli
+DISI, University of Trento, Italy
+═══════════════════════════════════════════════════════════════════════════════
+
+This file describes every file and folder in this repository, what it
+contains, and how it relates to the published paper.
+
+───────────────────────────────────────────────────────────────────────────────
+QUICK START
+───────────────────────────────────────────────────────────────────────────────
+
+1. Install dependencies:
+       pip install -r requirements.txt
+
+2. Regenerate all paper figures from the saved prediction logs:
+       cd src
+       python plot_fig7_from_real_logs.py          # Figure 7: yield projection
+       python plot_input_trajectory_from_real_logs.py  # Figure 6: input trajectory
+       python plot_spatial_agreement_from_real_logs.py # Figure 8: CV heatmap
+       python plot_dt_roundtrip_revised.py         # Figure 9: round-trip diagram
+
+3. Retrain the RF models from scratch (optional):
+       cd src
+       python preprocessing.py                    # cleans yield_df.csv
+       python per_crop_models.py                  # trains all 10 per-crop models
+
+───────────────────────────────────────────────────────────────────────────────
+FOLDER: src/
+───────────────────────────────────────────────────────────────────────────────
+
+Figure-generation scripts (read directly from results/RF_predictions_all_crops/
+so no re-inference is needed to reproduce the paper's figures):
+
+  plot_fig7_from_real_logs.py
+      Regenerates Figure 7 (per-crop RF yield projection, 2026-2029, across
+      four sensors and their mean). Reads RF_predictions_log_<crop>.json for
+      the five representative crops: rice_paddy, soybeans, sweet_potatoes,
+      wheat, yams. Output: fig_yield_projection_revised.pdf / .png
+
+  plot_input_trajectory_from_real_logs.py
+      Regenerates Figure 6 (input trajectory: avg. temperature, annual
+      rainfall, pesticides, 2026-2029, per sensor). Reads the input feature
+      values (avg_temp, rain, pesticides) stored inside
+      RF_predictions_log_rice_paddy.json (values are identical across all
+      crop logs since they are model inputs, not outputs).
+      Output: fig_input_trajectories_revised.pdf / .png
+
+  plot_spatial_agreement_from_real_logs.py
+      Regenerates Figure 8 (spatial agreement heatmap: CV across four sensors
+      per crop-year cell). Computes CV directly from the predicted_yield
+      values in each crop's JSON log. Output: fig_spatial_agreement_revised.pdf / .png
+
+  plot_dt_roundtrip_revised.py
+      Regenerates Figure 9 (DT message round-trip swimlane diagram:
+      sensor -> MQTT -> inference -> Ditto Thing update). This figure is
+      illustrative/annotated and is not derived from a numeric dataset;
+      the event labels (t0, t1, t2) and example predicted_yield = 37,374
+      are reproduced from the original experiment.
+      Output: fig_dt_roundtrip_revised.pdf / .png
+
+Pipeline and training scripts (your original experimental code):
+
+  config.py
+      Shared configuration used across all pipeline scripts: feature column
+      names (avg_temp, rain, pesticides, Area, Item, Year), RF
+      hyperparameters (n_estimators=200, max_features='sqrt',
+      min_samples_leaf=2), file paths for models and encoders, and crop
+      name mappings.
+
+  preprocessing.py
+      Loads yield_df.csv (FAO/World Bank extract), removes records with
+      missing values, applies LabelEncoder to the Area and Item categorical
+      fields, and persists the fitted encoders to models/encoders.pkl so
+      that identical encodings are applied at inference time.
+
+  per_crop_models.py
+      Trains one Random Forest regressor per crop on the global feature set
+      (avg_temp, rain, pesticides, encoded Area, encoded Item, Year) using
+      an 80/20 train-test split (random_state=42) and 5-fold cross-
+      validation. Saves each trained model as models/<crop>.pkl. Also runs
+      per-crop test evaluation and logs R2 and RMSE (reproducing Table II
+      in the paper).
+
+  dt_validation.py
+      Implements the two-sample Kolmogorov-Smirnov robustness experiment
+      (Section III-D of the paper). Generates a parallel DT-simulated input
+      set by perturbing each feature with Gaussian noise representative of
+      low-cost agricultural IoT instrumentation:
+        - Temperature: N(0, 0.5 degC)
+        - Rainfall:    N(0, 10 mm)
+        - Pesticides:  N(0, 2%)
+      Runs the KS test on the two resulting prediction distributions and
+      reports KS statistic and p-value per crop and jointly across all crops.
+      Also demonstrates the 180-day seasonal aggregation pipeline.
+
+  mqtt_dt_simulator.py / 05_mqtt_dt_simulator.py
+      MQTT-driven sensor telemetry simulator. Publishes synthetic sensor
+      readings for four virtual field sensors:
+        my.sensors:sensor01 ... my.sensors:sensor04
+      under the shared policy my.test:policy on Eclipse Ditto. Sensors are
+      distributed across four irrigation zones:
+        Zone A: drip irrigation    (sensor01)
+        Zone B: sprinkler          (sensor02)
+        Zone C: flood/furrow       (sensor03)
+        Zone D: micro-spray        (sensor04)
+      Each sensor carries a small additive offset relative to the shared
+      base trajectory (+-0.3 degC for temperature, +-5 mm for rainfall)
+      to model realistic within-field IoT variability.
+
+  06_interactive_predict.py / 06_whatif_engine.py
+      Interactive what-if scenario querying engine. Accepts user-specified
+      input values (temperature, rainfall, pesticides, country, crop, year)
+      and returns a predicted yield from the appropriate trained per-crop
+      RF model. Used to drive the 2026-2029 Mediterranean counterfactual
+      scenario described in Section III-E of the paper.
+
+───────────────────────────────────────────────────────────────────────────────
+FOLDER: models/
+───────────────────────────────────────────────────────────────────────────────
+
+Trained per-crop Random Forest regressors, one .pkl file per crop:
+
+  cassava.pkl           (9.4 MB)   Test R2 = 0.982  -- highest performing crop
+  maize.pkl             (21  MB)   Test R2 = 0.959
+  plantains_and_others.pkl (3.3 MB) Test R2 = 0.882 -- lowest performing crop
+  potatoes.pkl          (22  MB)   Test R2 = 0.960
+  rice_paddy.pkl        (17  MB)   Test R2 = 0.955
+  sorghum.pkl           (16  MB)   Test R2 = 0.928  -- note: CV R2 = 0.879
+  soybeans.pkl          (16  MB)   Test R2 = 0.926
+  sweet_potatoes.pkl    (15  MB)   Test R2 = 0.930
+  wheat.pkl             (20  MB)   Test R2 = 0.963
+  yams.pkl              (4.4 MB)   Test R2 = 0.938
+
+  encoders.pkl          (1.5 KB)
+      Fitted LabelEncoder objects for the Area (country) and Item (crop)
+      categorical fields. IMPORTANT: these must be used at inference time
+      to ensure encoding consistency with the training data. Loading the
+      .pkl models without loading encoders.pkl first will produce incorrect
+      predictions for any new input.
+
+All models were trained on the global FAO/World Bank feature set:
+  Features: avg_temp, rain, pesticides, encoded_Area, encoded_Item, Year
+  Train/test split: 80/20, random_state=42
+  Hyperparameters: n_estimators=200, max_features='sqrt', min_samples_leaf=2
+  CV: 5-fold on training partition
+
+───────────────────────────────────────────────────────────────────────────────
+FOLDER: data/
+───────────────────────────────────────────────────────────────────────────────
+
+  yield_df.csv
+      Cleaned FAO/World Bank crop-yield dataset extract. The raw dataset
+      was obtained from three public sources:
+        - FAO FAOSTAT statistical database (fao.org/faostat)
+        - World Bank Open Data: climate and agricultural indicators
+        - Kaggle crop yield prediction dataset
+      After cleaning (removal of records with missing values; no imputation
+      because missingness is structural), the dataset contains:
+        Records:   28,242 country-year observations
+        Years:     1990-2013
+        Countries: 101
+        Crops:     10 (wheat, yams, maize, soybeans, potatoes, sorghum,
+                       sweet potatoes, cassava, plantains and others,
+                       rice paddy)
+      Columns: Area (country name), Item (crop name), Year,
+               avg_temp (degC), rain (mm), pesticides (tonnes),
+               yield (hg/ha) [target variable]
+
+───────────────────────────────────────────────────────────────────────────────
+FOLDER: results/RF_predictions_all_crops/
+───────────────────────────────────────────────────────────────────────────────
+
+RF inference output logs for the 2026-2029 Mediterranean warming-and-drying
+counterfactual scenario described in Section III-E of the paper. One JSON
+file per crop (10 total), each containing one record per (sensor, year)
+combination (4 sensors x 4 years = 16 records per file).
+
+Files:
+  RF_predictions_log_cassava.json
+  RF_predictions_log_maize.json
+  RF_predictions_log_plantains_and_others.json
+  RF_predictions_log_potatoes.json
+  RF_predictions_log_rice_paddy.json
+  RF_predictions_log_sorghum.json
+  RF_predictions_log_soybeans.json
+  RF_predictions_log_sweet_potatoes.json
+  RF_predictions_log_wheat.json
+  RF_predictions_log_yams.json
+
+Each JSON record has the following fields:
+  sensor_id        sensor name (sensor01 / sensor02 / sensor03 / sensor04)
+  year             inference year (2026.0 / 2027.0 / 2028.0 / 2029.0)
+  avg_temp         average temperature input for this sensor/year (degC)
+  rain             annual rainfall input for this sensor/year (mm)
+  pesticides       pesticide use input for this sensor/year (tonnes)
+  predicted_yield  RF model output (hg/ha)
+
+Input trajectory (base values, before per-sensor offsets):
+  Year   Temp (degC)  Rainfall (mm)  Pesticides (tonnes)
+  2026   14.5         827.0          133.0
+  2027   14.8         810.0          135.0
+  2028   15.1         780.0          140.0
+  2029   15.4         750.0          145.0
+
+Per-sensor offsets applied on top of the base trajectory:
+  sensor01: +0.0 degC,  +0.0 mm  (base)
+  sensor02: +0.3 degC,  +4.2 mm
+  sensor03: -0.3 degC,  -1.5 mm
+  sensor04: +0.1 degC,  +2.1 mm
+
+These records are the exact source data used to generate Figures 6, 7,
+and 8 in the paper via the plot_*.py scripts in src/.
+
+───────────────────────────────────────────────────────────────────────────────
+OTHER FILES
+───────────────────────────────────────────────────────────────────────────────
+
+  README.md
+      Getting-started guide with quick-start instructions, repository
+      structure overview, and citation information.
+
+  requirements.txt
+      Python package dependencies:
+        numpy, pandas, scikit-learn, scipy,
+        matplotlib, seaborn, paho-mqtt, requests
+
+  .gitignore
+      Standard Python gitignore (excludes __pycache__, .pyc, .env,
+      virtual environments, .DS_Store).
+
+───────────────────────────────────────────────────────────────────────────────
+REPRODUCING THE PAPER'S RESULTS — STEP BY STEP
+───────────────────────────────────────────────────────────────────────────────
+
+A. Regenerate all figures (no retraining needed, ~seconds):
+   cd src
+   python plot_fig7_from_real_logs.py
+   python plot_input_trajectory_from_real_logs.py
+   python plot_spatial_agreement_from_real_logs.py
+   python plot_dt_roundtrip_revised.py
+
+B. Re-run the KS robustness experiment (Section III-D):
+   cd src
+   python dt_validation.py
+   Expected output: KS = 0.013, p = 0.42 (joint across all crops)
+
+C. Retrain all models from scratch (~5-10 min on a single CPU):
+   cd src
+   python preprocessing.py
+   python per_crop_models.py
+   Expected output: per-crop R2 > 0.92 for 8 of 10 crops;
+   overall R2 = 0.976, RMSE = 13,277 hg/ha
+
+D. Run the what-if scenario engine interactively:
+   cd src
+   python 06_whatif_engine.py
+
+E. Run the MQTT DT simulator (requires Eclipse Ditto running locally):
+   cd src
+   python 05_mqtt_dt_simulator.py
+
+───────────────────────────────────────────────────────────────────────────────
+IMPORTANT NOTES FOR REVIEWERS
+───────────────────────────────────────────────────────────────────────────────
+
+1. TRAINING DATA GRANULARITY
+   The RF models are trained on country-year aggregates (FAO/World Bank,
+   1990-2013). This means the models are calibrated to national-scale
+   climate and management statistics, not field-scale measurements.
+   The 180-day aggregator is architecturally designed to accept field-scale
+   inputs once a field-scale training corpus is available. See Section III-C
+   (Granularity Limitation) of the paper for full discussion.
+
+2. COUNTERFACTUAL SCENARIO
+   The 2026-2029 input trajectory is a controlled synthetic counterfactual,
+   not a meteorological forecast. It is designed to stress-test the pipeline
+   under a plausible Mediterranean warming-and-drying scenario. The reported
+   yield values characterise the model's response to this scenario, not
+   predictions of physical harvest.
+
+3. KS TEST SCOPE
+   The Kolmogorov-Smirnov robustness experiment (dt_validation.py) evaluates
+   robustness to independent Gaussian additive noise on each input channel
+   only. Systematic failure modes (calibration drift, packet loss, broker
+   congestion, sensor dropout) are outside the scope of this experiment.
+
+4. LATENCY MEASUREMENT
+   The round-trip latency reported in Figure 9 (<20 ms) was measured on a
+   local-network single-server setup and does not account for wide-area
+   network latency, cloud congestion, or multi-broker federation.
+
+═══════════════════════════════════════════════════════════════════════════════
+END OF REPOSITORY CONTENTS
+═══════════════════════════════════════════════════════════════════════════════
